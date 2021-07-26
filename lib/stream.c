@@ -10,6 +10,7 @@
 #include <sys/epoll.h>
 
 #define CONNECTION_BUFFER_SIZE (16 * 1024 * 1024)
+#define CONNECTION_BUFFER_SIZE_INITIAL 128
 
 long varlink_stream_new(VarlinkStream **streamp, int fd) {
         _cleanup_(freep) VarlinkStream *stream = NULL;
@@ -20,15 +21,17 @@ long varlink_stream_new(VarlinkStream **streamp, int fd) {
 
         stream->fd = fd;
 
-        stream->in = malloc(CONNECTION_BUFFER_SIZE);
+        stream->in = malloc(CONNECTION_BUFFER_SIZE_INITIAL);
         if (!stream->in)
                 return -VARLINK_ERROR_PANIC;
+        stream->in_length = CONNECTION_BUFFER_SIZE_INITIAL;
 
-        stream->out = malloc(CONNECTION_BUFFER_SIZE);
+        stream->out = malloc(CONNECTION_BUFFER_SIZE_INITIAL);
         if (!stream->out) {
                 free(stream->in);
                 return -VARLINK_ERROR_PANIC;
         }
+        stream->out_length = CONNECTION_BUFFER_SIZE_INITIAL;
 
         *streamp = stream;
         stream = NULL;
@@ -238,10 +241,19 @@ long varlink_stream_read(VarlinkStream *stream, VarlinkObject **messagep) {
 
                 if (stream->in_end == CONNECTION_BUFFER_SIZE)
                         return -VARLINK_ERROR_INVALID_MESSAGE;
+                else if (stream->in_end >= stream->in_length - 1) {
+                        uint8_t *tmp;
+                        stream->in_length *= 2;
+                        tmp = realloc(stream->in, stream->in_length);
+                        if (!tmp) {
+                                return -VARLINK_ERROR_PANIC;
+                        }
+                        stream->in = tmp;
+                }
 again:
                 n = read(stream->fd,
                          stream->in + stream->in_end,
-                         CONNECTION_BUFFER_SIZE - stream->in_end);
+                         stream->in_length - stream->in_end);
 
                 switch (n) {
                         case -1:
@@ -290,6 +302,7 @@ long varlink_stream_write(VarlinkStream *stream, VarlinkObject *message) {
         long length;
         unsigned long ulength;
         size_t r;
+        size_t final_length;
 
         length = varlink_object_to_json(message, &json);
         if (length < 0)
@@ -300,8 +313,21 @@ long varlink_stream_write(VarlinkStream *stream, VarlinkObject *message) {
         if (ulength >= CONNECTION_BUFFER_SIZE - 1)
                 return -VARLINK_ERROR_INVALID_MESSAGE;
 
-        if (stream->out_end + ulength + 1 >= CONNECTION_BUFFER_SIZE)
-                return -VARLINK_ERROR_SENDING_MESSAGE;
+        final_length = stream->out_end + ulength + 1;
+        if (final_length >= stream->out_length - 1) {
+                uint8_t *tmp;
+                while (final_length >= stream->out_length -1) {
+                        if (stream->out_length == CONNECTION_BUFFER_SIZE) {
+                                return -VARLINK_ERROR_SENDING_MESSAGE;
+                        }
+                        stream->out_length *= 2;
+                }
+                tmp = realloc(stream->out, stream->out_length);
+                if (!tmp) {
+                        return -VARLINK_ERROR_PANIC;
+                }
+                stream->out = tmp;
+        }
 
         memcpy(stream->out + stream->out_end, json, ulength + 1);
         stream->out_end += ulength + 1;

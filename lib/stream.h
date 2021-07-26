@@ -12,10 +12,12 @@ struct VarlinkStream {
         uint8_t *in;
         unsigned long in_start;
         unsigned long in_end;
+        size_t in_length;
 
         uint8_t *out;
         unsigned long out_start;
         unsigned long out_end;
+        size_t out_length;
 
         bool hup;
 };
